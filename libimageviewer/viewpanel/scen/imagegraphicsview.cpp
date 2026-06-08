@@ -107,6 +107,138 @@ QVariantList cachePixmap(const QString &path)
 }
 
 }  // namespace
+
+#ifdef HAS_WAYLAND_PINCH
+#include <qpa/qplatformnativeinterface.h>
+#include <pointer-gestures-unstable-v1-client.h>
+
+// QObject 封装，通过 zwp_pointer_gesture_pinch_v1 Wayland 原生协议
+// 获取触摸板双指缩放的连续事件（替代不可靠的 QPinchGesture / wheelEvent）
+class WaylandPinchHelper : public QObject
+{
+public:
+    using PinchUpdatedCallback = std::function<void(QPointF centerDelta, double scaleFactor)>;
+    using PinchEndedCallback = std::function<void()>;
+
+    explicit WaylandPinchHelper(QObject *parent = nullptr) : QObject(parent) {}
+    ~WaylandPinchHelper() override { cleanup(); }
+
+    bool init()
+    {
+        QPlatformNativeInterface *native = QGuiApplication::platformNativeInterface();
+        if (!native) return false;
+
+        m_display = static_cast<wl_display *>(
+            native->nativeResourceForIntegration(QByteArrayLiteral("display")));
+        if (!m_display) return false;
+
+        m_registry = wl_display_get_registry(m_display);
+
+        static const wl_registry_listener registry_listener = {
+            [](void *data, wl_registry *registry, uint32_t name,
+               const char *interface, uint32_t version) {
+                auto *self = static_cast<WaylandPinchHelper *>(data);
+                if (strcmp(interface, "zwp_pointer_gestures_v1") == 0) {
+                    self->m_gestures = static_cast<zwp_pointer_gestures_v1 *>(
+                        wl_registry_bind(registry, name,
+                                         &zwp_pointer_gestures_v1_interface,
+                                         qMin(version, 1u)));
+                } else if (strcmp(interface, "wl_seat") == 0) {
+                    self->m_seat = static_cast<wl_seat *>(
+                        wl_registry_bind(registry, name,
+                                         &wl_seat_interface,
+                                         qMin(version, 1u)));
+                }
+            },
+            [](void *, wl_registry *, uint32_t) {}
+        };
+
+        wl_registry_add_listener(m_registry, &registry_listener, this);
+        wl_display_roundtrip(m_display);
+
+        if (!m_gestures || !m_seat) return false;
+
+        m_pointer = wl_seat_get_pointer(m_seat);
+        if (!m_pointer) return false;
+
+        // ★ 核心：客户端主动 get_pinch_gesture
+        m_pinch = zwp_pointer_gestures_v1_get_pinch_gesture(m_gestures, m_pointer);
+        if (!m_pinch) return false;
+
+        static const zwp_pointer_gesture_pinch_v1_listener pinch_listener = {
+            [](void *data, zwp_pointer_gesture_pinch_v1 *,
+               uint32_t serial, uint32_t time, wl_surface *,
+               uint32_t fingers) {
+                auto *self = static_cast<WaylandPinchHelper *>(data);
+                self->m_pinchActive = true;
+                self->m_cumulativeScale = 1.0;
+            },
+            [](void *data, zwp_pointer_gesture_pinch_v1 *,
+               uint32_t time, wl_fixed_t dx, wl_fixed_t dy,
+               wl_fixed_t scale, wl_fixed_t rotation) {
+                auto *self = static_cast<WaylandPinchHelper *>(data);
+                if (!self->m_pinchActive) return;
+                double s = wl_fixed_to_double(scale);
+                double delta = s / self->m_cumulativeScale;
+                self->m_cumulativeScale = s;
+                if (self->m_onPinchUpdated) {
+                    self->m_onPinchUpdated(QPointF(wl_fixed_to_double(dx),
+                                                   wl_fixed_to_double(dy)),
+                                           delta);
+                }
+            },
+            [](void *data, zwp_pointer_gesture_pinch_v1 *,
+               uint32_t serial, uint32_t time, int32_t cancelled) {
+                auto *self = static_cast<WaylandPinchHelper *>(data);
+                self->m_pinchActive = false;
+                if (self->m_onPinchEnded) self->m_onPinchEnded();
+            }
+        };
+
+        zwp_pointer_gesture_pinch_v1_add_listener(m_pinch, &pinch_listener, this);
+
+        // 定期 flush 确保事件到达
+        m_flushTimer = new QTimer(this);
+        connect(m_flushTimer, &QTimer::timeout, this, [this]() {
+            if (m_display) wl_display_flush(m_display);
+        });
+        m_flushTimer->start(16);
+
+        return true;
+    }
+
+    void cleanup()
+    {
+        if (m_flushTimer) { m_flushTimer->stop(); m_flushTimer = nullptr; }
+        if (m_pinch)   zwp_pointer_gesture_pinch_v1_destroy(m_pinch);
+        if (m_pointer) wl_pointer_destroy(m_pointer);
+        if (m_gestures) zwp_pointer_gestures_v1_destroy(m_gestures);
+        if (m_registry) wl_registry_destroy(m_registry);
+        m_pinch = nullptr;
+        m_pointer = nullptr;
+        m_seat = nullptr;
+        m_gestures = nullptr;
+        m_registry = nullptr;
+    }
+
+    void setOnPinchUpdated(PinchUpdatedCallback cb) { m_onPinchUpdated = std::move(cb); }
+    void setOnPinchEnded(PinchEndedCallback cb) { m_onPinchEnded = std::move(cb); }
+
+private:
+    wl_display *m_display = nullptr;
+    wl_registry *m_registry = nullptr;
+    zwp_pointer_gestures_v1 *m_gestures = nullptr;
+    wl_seat *m_seat = nullptr;
+    wl_pointer *m_pointer = nullptr;
+    zwp_pointer_gesture_pinch_v1 *m_pinch = nullptr;
+    bool m_pinchActive = false;
+    double m_cumulativeScale = 1.0;
+    QTimer *m_flushTimer = nullptr;
+    PinchUpdatedCallback m_onPinchUpdated;
+    PinchEndedCallback m_onPinchEnded;
+};
+#endif  // HAS_WAYLAND_PINCH
+
 LibImageGraphicsView::LibImageGraphicsView(QWidget *parent)
     : QGraphicsView(parent)
     , m_renderer(Native)
@@ -206,7 +338,26 @@ LibImageGraphicsView::LibImageGraphicsView(QWidget *parent)
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Right), this);
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Up), this);
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Down), this);
+
+#ifdef HAS_WAYLAND_PINCH
+    // Wayland 下创建 zwp_pointer_gesture_pinch_v1 手势对象，接收连续缩放事件
+    m_waylandPinch = new WaylandPinchHelper(this);
+    if (m_waylandPinch->init()) {
+        m_waylandPinch->setOnPinchUpdated(
+            [this](const QPointF &centerDelta, double scaleFactor) {
+                QPoint pos = mapFromGlobal(QCursor::pos());
+                pos += QPoint(static_cast<int>(centerDelta.x()),
+                              static_cast<int>(centerDelta.y()));
+                scaleAtPoint(pos, scaleFactor);
+            });
+        m_waylandPinch->setOnPinchEnded([]() {});
+    } else {
+        delete m_waylandPinch;
+        m_waylandPinch = nullptr;
+    }
+#endif
 }
+
 
 int LibImageGraphicsView::getcurrentImgCount()
 {

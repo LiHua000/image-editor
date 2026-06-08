@@ -55,6 +55,55 @@ pkg_check_modules(3rd_lib REQUIRED
     libmediainfo
     )
 
+# wayland-client（可选），用于 Wayland 原生 pinch 协议
+pkg_check_modules(wayland_client wayland-client)
+if(wayland_client_FOUND)
+    message(STATUS "Found wayland-client: ${wayland_client_VERSION}")
+
+    # 查找 wayland 协议 XML 文件
+    pkg_get_variable(protocols_dir wayland-protocols pkgdatadir)
+    set(POINTER_GESTURES_XML "")
+    if(protocols_dir)
+        set(candidate "${protocols_dir}/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml")
+        if(EXISTS "${candidate}")
+            set(POINTER_GESTURES_XML "${candidate}")
+        endif()
+    endif()
+    if(NOT POINTER_GESTURES_XML)
+        foreach(candidate
+            "/usr/share/wayland-protocols/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml"
+            "/usr/local/share/wayland-protocols/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml")
+            if(EXISTS "${candidate}")
+                set(POINTER_GESTURES_XML "${candidate}")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(POINTER_GESTURES_XML)
+        set(GESTURE_HEADER ${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client.h)
+        set(GESTURE_CODE ${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client.c)
+        add_custom_command(OUTPUT ${GESTURE_HEADER}
+            COMMAND wayland-scanner client-header "${POINTER_GESTURES_XML}"
+            "${GESTURE_HEADER}"
+            DEPENDS "${POINTER_GESTURES_XML}"
+            COMMENT "Generating wayland pointer-gestures protocol header")
+        add_custom_command(OUTPUT ${GESTURE_CODE}
+            COMMAND wayland-scanner private-code "${POINTER_GESTURES_XML}"
+            "${GESTURE_CODE}"
+            DEPENDS "${POINTER_GESTURES_XML}"
+            COMMENT "Generating wayland pointer-gestures protocol code")
+        add_definitions(-DHAS_WAYLAND_PINCH)
+        include_directories(${CMAKE_CURRENT_BINARY_DIR})
+        list(APPEND WAYLAND_GENERATED ${GESTURE_HEADER} ${GESTURE_CODE})
+        message(STATUS "HAS_WAYLAND_PINCH enabled — Wayland pinch events supported")
+    else()
+        message(STATUS "wayland-protocols XML not found — Wayland pinch unavailable")
+    endif()
+else()
+    message(STATUS "wayland-client not found — Wayland pinch unavailable")
+endif()
+
 # 查找 dfm-io
 pkg_check_modules(dfm-io_lib dfm-io)
 if(${dfm-io_lib_FOUND})
@@ -101,7 +150,7 @@ endif ()
 set_directory_properties(PROPERTIES CLEAN_NO_CUSTOM 1)
 
 #编译为库
-add_library(imageviewer SHARED ${allHeaders} ${allSources} ${RESOURCES} ${QM} ${tiffToolsSources})
+add_library(imageviewer SHARED ${allHeaders} ${allSources} ${RESOURCES} ${QM} ${tiffToolsSources} ${WAYLAND_GENERATED})
 #使用库
 qt5_use_modules(imageviewer ${QtModule})
 
@@ -112,8 +161,8 @@ set(${TARGET_NAME} ${CMAKE_INSTALL_LIBDIR})
 
 set_target_properties(${TARGET_NAME} PROPERTIES VERSION 0.1.0 SOVERSION 0.1)
 
-target_include_directories(${CMD_NAME} PUBLIC ${3rd_lib_INCLUDE_DIRS}  ${TIFF_INCLUDE_DIRS} ${dfm-io_lib_INCLUDE_DIRS})
-target_link_libraries(imageviewer ${3rd_lib_LIBRARIES}  ${TIFF_LIBRARIES} ${dfm-io_lib_LIBRARIES} dl)
+target_include_directories(${CMD_NAME} PUBLIC ${3rd_lib_INCLUDE_DIRS}  ${TIFF_INCLUDE_DIRS} ${dfm-io_lib_INCLUDE_DIRS} ${wayland_client_INCLUDE_DIRS})
+target_link_libraries(imageviewer ${3rd_lib_LIBRARIES}  ${TIFF_LIBRARIES} ${dfm-io_lib_LIBRARIES} ${wayland_client_LIBRARIES} Qt5::GuiPrivate dl)
 
 include(GNUInstallDirs)
 configure_file(libimageviewer.pc.in ${PROJECT_BINARY_DIR}/libimageviewer.pc @ONLY)
