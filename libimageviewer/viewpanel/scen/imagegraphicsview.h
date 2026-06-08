@@ -45,7 +45,6 @@ DWIDGET_END_NAMESPACE
 DWIDGET_USE_NAMESPACE
 
 class CFileWatcher;
-class WaylandPinchHelper;
 class LibImageGraphicsView : public QGraphicsView
 {
     Q_OBJECT
@@ -233,13 +232,6 @@ private:
     //是否可以旋转
     bool m_bRoate{false};
     qreal m_scal = 1.0;
-
-    // 双指触摸缩放：QTouchEvent 方式（Wayland 兼容）
-    qreal m_lastPinchDistance = 0.0;
-    bool m_pinchFromTouchActive = false;
-
-    // Wayland 原生 pinch 协议 (zwp_pointer_gesture_pinch_v1)
-    WaylandPinchHelper *m_waylandPinch = nullptr;
 
     NewImageLoadPhase m_newImageLoadPhase{FullFinish};
     int m_newImageRotateAngle = 0;

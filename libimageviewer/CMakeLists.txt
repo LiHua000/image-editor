@@ -55,9 +55,6 @@ pkg_check_modules(3rd_lib REQUIRED
     libmediainfo
     )
 
-# wayland-client（可选），用于 Wayland 原生 pinch 协议
-pkg_check_modules(wayland_client wayland-client)
-
 # 查找 dfm-io
 pkg_check_modules(dfm-io_lib dfm-io)
 if(${dfm-io_lib_FOUND})
@@ -65,21 +62,6 @@ if(${dfm-io_lib_FOUND})
     add_definitions(-DUSE_DFM_IO)
 else()
     message("Not found dfm-io, use base api copy MTP file.")
-endif()
-
-# 生成 wayland 触摸板手势协议头文件
-if(wayland_client_FOUND)
-    set(POINTER_GESTURES_XML "/usr/share/wayland-protocols/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml")
-    if(EXISTS "${POINTER_GESTURES_XML}")
-        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client.h
-            COMMAND wayland-scanner client-header "${POINTER_GESTURES_XML}"
-            "${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client.h"
-            DEPENDS "${POINTER_GESTURES_XML}"
-            COMMENT "Generating wayland pointer-gestures protocol header"
-        )
-        list(APPEND allGeneratedHeaders ${CMAKE_CURRENT_BINARY_DIR}/pointer-gestures-unstable-v1-client.h)
-        add_definitions(-DHAS_WAYLAND_PINCH)
-    endif()
 endif()
 
 #需要打开的头文件
@@ -119,7 +101,7 @@ endif ()
 set_directory_properties(PROPERTIES CLEAN_NO_CUSTOM 1)
 
 #编译为库
-add_library(imageviewer SHARED ${allHeaders} ${allSources} ${allGeneratedHeaders} ${RESOURCES} ${QM} ${tiffToolsSources})
+add_library(imageviewer SHARED ${allHeaders} ${allSources} ${RESOURCES} ${QM} ${tiffToolsSources})
 #使用库
 qt5_use_modules(imageviewer ${QtModule})
 
@@ -130,8 +112,8 @@ set(${TARGET_NAME} ${CMAKE_INSTALL_LIBDIR})
 
 set_target_properties(${TARGET_NAME} PROPERTIES VERSION 0.1.0 SOVERSION 0.1)
 
-target_include_directories(${CMD_NAME} PUBLIC ${3rd_lib_INCLUDE_DIRS}  ${TIFF_INCLUDE_DIRS} ${dfm-io_lib_INCLUDE_DIRS} ${wayland_client_INCLUDE_DIRS})
-target_link_libraries(imageviewer ${3rd_lib_LIBRARIES}  ${TIFF_LIBRARIES} ${dfm-io_lib_LIBRARIES} ${wayland_client_LIBRARIES} Qt5::GuiPrivate dl)
+target_include_directories(${CMD_NAME} PUBLIC ${3rd_lib_INCLUDE_DIRS}  ${TIFF_INCLUDE_DIRS} ${dfm-io_lib_INCLUDE_DIRS})
+target_link_libraries(imageviewer ${3rd_lib_LIBRARIES}  ${TIFF_LIBRARIES} ${dfm-io_lib_LIBRARIES} dl)
 
 include(GNUInstallDirs)
 configure_file(libimageviewer.pc.in ${PROJECT_BINARY_DIR}/libimageviewer.pc @ONLY)

@@ -26,8 +26,6 @@
 #include <QDesktopWidget>
 #include <QShortcut>
 #include <QApplication>
-#include <QTouchEvent>
-#include <QLineF>
 #include <DSpinner>
 
 #include "graphicsitem.h"
@@ -109,140 +107,6 @@ QVariantList cachePixmap(const QString &path)
 }
 
 }  // namespace
-
-#ifdef HAS_WAYLAND_PINCH
-#include <qpa/qplatformnativeinterface.h>
-#include <pointer-gestures-unstable-v1-client.h>
-
-// QObject 封装，通过 zwp_pointer_gesture_pinch_v1 Wayland 原生协议
-// 获取触摸板双指缩放的连续事件
-class WaylandPinchHelper : public QObject
-{
-public:
-    using PinchUpdatedCallback = std::function<void(QPointF centerDelta, double scaleFactor)>;
-    using PinchEndedCallback = std::function<void()>;
-
-    explicit WaylandPinchHelper(QObject *parent = nullptr)
-        : QObject(parent) {}
-
-    ~WaylandPinchHelper() override { cleanup(); }
-
-    bool init()
-    {
-        QPlatformNativeInterface *native = QGuiApplication::platformNativeInterface();
-        if (!native) return false;
-
-        m_display = static_cast<wl_display *>(
-            native->nativeResourceForIntegration(QByteArrayLiteral("display")));
-        if (!m_display) return false;
-
-        m_registry = wl_display_get_registry(m_display);
-
-        static const wl_registry_listener registry_listener = {
-            // global
-            [](void *data, wl_registry *registry, uint32_t name,
-               const char *interface, uint32_t version) {
-                auto *self = static_cast<WaylandPinchHelper *>(data);
-                if (strcmp(interface, "zwp_pointer_gestures_v1") == 0) {
-                    self->m_gestures = static_cast<zwp_pointer_gestures_v1 *>(
-                        wl_registry_bind(registry, name,
-                                         &zwp_pointer_gestures_v1_interface,
-                                         qMin(version, 1u)));
-                } else if (strcmp(interface, "wl_seat") == 0) {
-                    self->m_seat = static_cast<wl_seat *>(
-                        wl_registry_bind(registry, name,
-                                         &wl_seat_interface,
-                                         qMin(version, 1u)));
-                }
-            },
-            // global_remove
-            [](void *data, wl_registry *registry, uint32_t name) {}
-        };
-
-        wl_registry_add_listener(m_registry, &registry_listener, this);
-        wl_display_roundtrip(m_display);
-
-        if (!m_gestures || !m_seat) return false;
-
-        m_pointer = wl_seat_get_pointer(m_seat);
-        if (!m_pointer) return false;
-
-        // ★ 核心：客户端主动获取 pinch 手势对象
-        m_pinch = zwp_pointer_gestures_v1_get_pinch_gesture(m_gestures, m_pointer);
-        if (!m_pinch) return false;
-
-        static const zwp_pointer_gesture_pinch_v1_listener pinch_listener = {
-            // begin
-            [](void *data, zwp_pointer_gesture_pinch_v1 *gesture,
-               uint32_t serial, uint32_t time, wl_surface *surface,
-               uint32_t fingers) {
-                auto *self = static_cast<WaylandPinchHelper *>(data);
-                self->m_pinchActive = true;
-                self->m_cumulativeScale = 1.0;
-            },
-            // update: 连续缩放事件
-            [](void *data, zwp_pointer_gesture_pinch_v1 *gesture,
-               uint32_t time, wl_fixed_t dx, wl_fixed_t dy,
-               wl_fixed_t scale, wl_fixed_t rotation) {
-                auto *self = static_cast<WaylandPinchHelper *>(data);
-                if (!self->m_pinchActive) return;
-                double scaleFactor = wl_fixed_to_double(scale);
-                double dx_double = wl_fixed_to_double(dx);
-                double dy_double = wl_fixed_to_double(dy);
-                // scale 是累计值，换算为本次增量
-                double deltaScale = scaleFactor / self->m_cumulativeScale;
-                self->m_cumulativeScale = scaleFactor;
-                if (self->m_onPinchUpdated) {
-                    self->m_onPinchUpdated(QPointF(dx_double, dy_double), deltaScale);
-                }
-            },
-            // end
-            [](void *data, zwp_pointer_gesture_pinch_v1 *gesture,
-               uint32_t serial, uint32_t time, int32_t cancelled) {
-                auto *self = static_cast<WaylandPinchHelper *>(data);
-                self->m_pinchActive = false;
-                if (self->m_onPinchEnded) {
-                    self->m_onPinchEnded();
-                }
-            }
-        };
-
-        zwp_pointer_gesture_pinch_v1_add_listener(m_pinch, &pinch_listener, this);
-
-        return true;
-    }
-
-    void cleanup()
-    {
-        if (m_pinch) zwp_pointer_gesture_pinch_v1_destroy(m_pinch);
-        if (m_pointer) wl_pointer_destroy(m_pointer);
-        if (m_gestures) zwp_pointer_gestures_v1_destroy(m_gestures);
-        if (m_registry) wl_registry_destroy(m_registry);
-        m_pinch = nullptr;
-        m_pointer = nullptr;
-        m_seat = nullptr;
-        m_gestures = nullptr;
-        m_registry = nullptr;
-        m_display = nullptr;
-    }
-
-    void setOnPinchUpdated(PinchUpdatedCallback cb) { m_onPinchUpdated = std::move(cb); }
-    void setOnPinchEnded(PinchEndedCallback cb) { m_onPinchEnded = std::move(cb); }
-
-private:
-    wl_display *m_display = nullptr;
-    wl_registry *m_registry = nullptr;
-    zwp_pointer_gestures_v1 *m_gestures = nullptr;
-    wl_seat *m_seat = nullptr;
-    wl_pointer *m_pointer = nullptr;
-    zwp_pointer_gesture_pinch_v1 *m_pinch = nullptr;
-    bool m_pinchActive = false;
-    double m_cumulativeScale = 1.0;
-    PinchUpdatedCallback m_onPinchUpdated;
-    PinchEndedCallback m_onPinchEnded;
-};
-#endif  // HAS_WAYLAND_PINCH
-
 LibImageGraphicsView::LibImageGraphicsView(QWidget *parent)
     : QGraphicsView(parent)
     , m_renderer(Native)
@@ -342,26 +206,6 @@ LibImageGraphicsView::LibImageGraphicsView(QWidget *parent)
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Right), this);
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Up), this);
     new QShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::SHIFT + Qt::Key_Down), this);
-
-#ifdef HAS_WAYLAND_PINCH
-    // Wayland 下创建 zwp_pointer_gesture_pinch_v1 手势对象，接收连续缩放事件
-    m_waylandPinch = new WaylandPinchHelper(this);
-    if (m_waylandPinch->init()) {
-        m_waylandPinch->setOnPinchUpdated(
-            [this](const QPointF &centerDelta, double scaleFactor) {
-                QPoint pos = mapFromGlobal(QCursor::pos());
-                pos += QPoint(static_cast<int>(centerDelta.x()),
-                              static_cast<int>(centerDelta.y()));
-                scaleAtPoint(pos, scaleFactor);
-            });
-        m_waylandPinch->setOnPinchEnded([]() {});
-        qDebug() << "[PINCH-DEBUG] Wayland pinch protocol initialized";
-    } else {
-        delete m_waylandPinch;
-        m_waylandPinch = nullptr;
-        qDebug() << "[PINCH-DEBUG] Wayland pinch init failed (fallback to wheelEvent)";
-    }
-#endif
 }
 
 int LibImageGraphicsView::getcurrentImgCount()
@@ -667,7 +511,6 @@ void LibImageGraphicsView::setImage(const QString &path, const QImage &image)
 
 void LibImageGraphicsView::setScaleValue(qreal v)
 {
-    qDebug() << "[PINCH-DEBUG] setScaleValue: v=" << v << "m_scal=" << m_scal;
     //预先计算需要的缩放比
     double temp = m_scal * v;
     double scaleFactor = -1.0;
@@ -1314,31 +1157,11 @@ int static count = 0;
 bool LibImageGraphicsView::event(QEvent *event)
 {
     QEvent::Type evType = event->type();
-
-    // LOG: 记录所有触摸/手势事件类型
-    if (evType == QEvent::TouchBegin) {
-        qDebug() << "[PINCH-DEBUG] QEvent::TouchBegin";
-    }
-    if (evType == QEvent::TouchUpdate) {
-        QTouchEvent *touchEvent = dynamic_cast<QTouchEvent *>(event);
-        QList<QTouchEvent::TouchPoint> touchPoints = touchEvent->touchPoints();
-        qDebug() << "[PINCH-DEBUG] QEvent::TouchUpdate" << touchPoints.size() << "points, count=" << count;
-    }
-    if (evType == QEvent::TouchEnd) {
-        qDebug() << "[PINCH-DEBUG] QEvent::TouchEnd, final count=" << count;
-    }
-    if (evType == QEvent::Gesture) {
-        qDebug() << "[PINCH-DEBUG] QEvent::Gesture";
-    }
-
     if (evType == QEvent::TouchBegin || evType == QEvent::TouchUpdate ||
             evType == QEvent::TouchEnd) {
         if (evType == QEvent::TouchBegin) {
             count = 0;
             m_maxTouchPoints = 1;
-            m_lastPinchDistance = 0.0;
-            m_pinchFromTouchActive = false;
-            qDebug() << "[PINCH-DEBUG] TouchBegin: reset state";
         }
         if (evType == QEvent::TouchUpdate) {
             QTouchEvent *touchEvent = dynamic_cast<QTouchEvent *>(event);
@@ -1346,41 +1169,10 @@ bool LibImageGraphicsView::event(QEvent *event)
             if (touchPoints.size() > count) {
                 count = touchPoints.size();
             }
-
-            // Wayland 下 QPinchGesture 不可靠，直接从 QTouchEvent 计算双指缩放
-            if (touchPoints.size() >= 2) {
-                m_pinchFromTouchActive = true;
-                m_maxTouchPoints = 2;
-
-                QPointF p1 = touchPoints.at(0).pos();
-                QPointF p2 = touchPoints.at(1).pos();
-                qreal currentDistance = QLineF(p1, p2).length();
-                QPointF centerPoint = (p1 + p2) / 2.0;
-
-                qDebug() << "[PINCH-DEBUG] TouchUpdate 2pts: dist=" << currentDistance
-                         << "lastDist=" << m_lastPinchDistance
-                         << "center=" << centerPoint;
-
-                if (m_lastPinchDistance > 0.0) {
-                    qreal factor = currentDistance / m_lastPinchDistance;
-                    qDebug() << "[PINCH-DEBUG] scaleFactor=" << factor;
-                    if (qAbs(factor - 1.0) > 0.006) {
-                        scaleAtPoint(centerPoint.toPoint(), factor);
-                        qDebug() << "[PINCH-DEBUG] scaleAtPoint called, factor=" << factor;
-                    }
-                } else {
-                    qDebug() << "[PINCH-DEBUG] first frame, recording initial distance";
-                }
-                m_lastPinchDistance = currentDistance;
-            } else {
-                qDebug() << "[PINCH-DEBUG] TouchUpdate" << touchPoints.size() << "points (not a pinch)";
-            }
         }
         if (evType == QEvent::TouchEnd) {
             QTouchEvent *touchEvent = dynamic_cast<QTouchEvent *>(event);
             QList<QTouchEvent::TouchPoint> touchPoints = touchEvent->touchPoints();
-            m_lastPinchDistance = 0.0;
-            qDebug() << "[PINCH-DEBUG] TouchEnd:" << touchPoints.size() << "points, m_pinchFromTouchActive=" << m_pinchFromTouchActive;
 
             if (touchPoints.size() == 1 && count <= 1) {
                 //QPointF centerPointOffset = gesture->centerPoint();
@@ -1396,15 +1188,21 @@ bool LibImageGraphicsView::event(QEvent *event)
                 }
             }
         }
-    } else if (evType == QEvent::Gesture) {
-        QGestureEvent *ge = static_cast<QGestureEvent *>(event);
-        QList<QGesture *> gestures = ge->gestures();
-        for (QGesture *g : gestures) {
-            qDebug() << "[PINCH-DEBUG]  Gesture type:" << g->gestureType()
-                     << "state:" << g->state();
-        }
+        /*lmh0804*/
+//        const QRect &r = visibleImageRect();
+//        double left = r.width() + r.x();
+//        const QRectF &sr = sceneRect();
+//        if (r.x() <= 1) {
+//            return true;
+//        }
+//        if (left - sr.width() >= -1 && left - sr.width() <= 1) {
+//            return true;
+//        }
+//        if (r.width() >= sr.width()) {
+//            return true;
+//        }
+    } else if (evType == QEvent::Gesture)
         handleGestureEvent(static_cast<QGestureEvent *>(event));
-    }
 
     return QGraphicsView::event(event);
 }
@@ -1509,25 +1307,14 @@ void LibImageGraphicsView::scaleAtPoint(QPoint pos, qreal factor)
 
 void LibImageGraphicsView::handleGestureEvent(QGestureEvent *gesture)
 {
-    qDebug() << "[PINCH-DEBUG] handleGestureEvent called, gesture count:" << gesture->gestures().size();
     if (QGesture *pinch = gesture->gesture(Qt::PinchGesture))
         pinchTriggered(static_cast<QPinchGesture *>(pinch));
 }
 
 void LibImageGraphicsView::pinchTriggered(QPinchGesture *gesture)
 {
-    // 双指缩放已通过 QTouchEvent 处理，跳过此路径（Wayland 兼容）
-    if (m_pinchFromTouchActive) {
-        qDebug() << "[PINCH-DEBUG] pinchTriggered SKIP (m_pinchFromTouchActive=true)";
-        return;
-    }
-
     m_maxTouchPoints = 2;
     QPinchGesture::ChangeFlags changeFlags = gesture->changeFlags();
-    qDebug() << "[PINCH-DEBUG] pinchTriggered: changeFlags=" << changeFlags
-             << "scaleFactor=" << gesture->scaleFactor()
-             << "centerPoint=" << gesture->centerPoint()
-             << "state=" << gesture->state();
     if (changeFlags & QPinchGesture::ScaleFactorChanged) {
         QPoint pos = mapFromGlobal(gesture->centerPoint().toPoint());
         if (abs(gesture->scaleFactor() - 1) > 0.006) {
@@ -1702,12 +1489,6 @@ void LibImageGraphicsView::wheelEvent(QWheelEvent *event)
         return;
     }
 
-    qDebug() << "[PINCH-DEBUG] wheelEvent: delta=" << event->delta()
-             << "pixelDelta=" << event->pixelDelta()
-             << "modifiers=" << event->modifiers()
-             << "source=" << event->source()
-             << "pos=" << event->pos();
-
     if ((event->modifiers() == Qt::ControlModifier)) {
         if (event->delta() > 0) {
             emit previousRequested();
@@ -1722,7 +1503,7 @@ void LibImageGraphicsView::wheelEvent(QWheelEvent *event)
         } else {
 
             qreal factor = qPow(1.2, event->delta() / 240.0);
-            qDebug() << "[PINCH-DEBUG] wheelEvent: zoom factor=" << factor;
+            qDebug() << factor;
             scaleAtPoint(event->pos(), factor);
 
             event->accept();
